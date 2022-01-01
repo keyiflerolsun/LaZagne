@@ -6,4 +6,3 @@ rsa; sys_platform == 'win32'
 https://github.com/AlessandroZ/pypykatz/archive/master.zip; python_version < '3.4' and sys_platform == 'win32'
 https://github.com/skelsec/pypykatz/archive/master.zip; python_version  > '3.5' and sys_platform == 'win32'
 pycryptodome
-pyTelegramBotAPI
