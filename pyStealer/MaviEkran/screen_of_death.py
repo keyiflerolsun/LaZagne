@@ -28,23 +28,33 @@ Contact your system administrator or technical support group for further assista
 pencere = tk.Tk()
 
 import platform
+
 hedef_sistem = platform.system()
-if hedef_sistem == "Windows":    
-	import winsound
-	pencere.after(100, lambda: winsound.PlaySound("SystemHand", winsound.SND_ALIAS))
-	pencere.config(cursor = "circle")
+if hedef_sistem == "Windows":
+    import winsound
+
+    pencere.after(100, lambda: winsound.PlaySound("SystemHand", winsound.SND_ALIAS))
+    pencere.config(cursor="circle")
 else:
-    pencere.config(cursor = "none")
+    pencere.config(cursor="none")
 
 pencere.attributes("-fullscreen", True)
-pencere.config(bg = "#000088")
+pencere.config(bg="#000088")
 # pencere.bind("<Escape>", lambda event: pencere.destroy())
 
-cerceve = tk.Frame(pencere, bg = "#000088")
-cerceve.place(relx = 0, rely = 0)
+cerceve = tk.Frame(pencere, bg="#000088")
+cerceve.place(relx=0, rely=0)
 
-etiket = tk.Label(cerceve, text = mesaj, bg = "#000088", fg = "white", justify = "left", wraplength = 1000, font = ("Lucida Console", "16"))
-etiket.pack(ipadx = 75, ipady = 75, fill = "y")
+etiket = tk.Label(
+    cerceve,
+    text	   	= mesaj,
+    bg		   	= "#000088",
+    fg		   	= "white",
+    justify	   	= "left",
+    wraplength 	= 1000,
+    font		= ("Lucida Console", "16"),
+)
+etiket.pack(ipadx=75, ipady=75, fill="y")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     pencere.mainloop()
