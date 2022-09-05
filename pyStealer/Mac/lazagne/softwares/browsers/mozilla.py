@@ -19,7 +19,6 @@ from lazagne.config.constant import constant
 from pyasn1.codec.der import decoder
 from binascii import unhexlify
 from base64 import b64decode
-from lazagne.config.winstructure import char_to_int, convert_to_byte
 from hashlib import sha1, pbkdf2_hmac
 
 try:
@@ -39,6 +38,20 @@ def l(n):
 
 CKA_ID = unhexlify('f8000000000000000000000000000001')
 AES_BLOCK_SIZE = 16
+
+
+def convert_to_byte(s):
+    if python_version == 2:
+        return s
+    else:
+        return s.encode()
+
+
+def o(c):
+    if python_version == 2:
+        return ord(c)
+    else:
+        return c
 
 
 def long_to_bytes(n, blocksize=0):
@@ -75,7 +88,7 @@ def long_to_bytes(n, blocksize=0):
 class Mozilla(ModuleInfo):
 
     def __init__(self, browser_name, path):
-        self.path = path
+        self.path = os.path.expanduser(path)
         ModuleInfo.__init__(self, browser_name, category='browsers')
 
     def get_firefox_profiles(self, directory):
@@ -101,7 +114,6 @@ class Mozilla(ModuleInfo):
                         profile_path = os.path.join(directory, cp.get(section, 'Path').strip())
 
                     if profile_path:
-                        profile_path = profile_path.replace('/', '\\')
                         profile_list.append(profile_path)
 
         except Exception as e:
@@ -206,11 +218,11 @@ class Mozilla(ModuleInfo):
         """
         Used for debug
         """
-        type_ = char_to_int(d[0])
-        length = char_to_int(d[1])
+        type_ = o(d[0])
+        length = o(d[1])
         if length & 0x80 > 0:  # http://luca.ntop.org/Teaching/Appunti/asn1.html,
             # nByteLength = length & 0x7f
-            length = char_to_int(d[2])
+            length = o(d[2])
             # Long form. Two to 127 octets. Bit 8 of first octet has value "1" and
             # bits 7-1 give the number of additional length octets.
             skip = 1
@@ -342,8 +354,8 @@ class Mozilla(ModuleInfo):
             return None
 
         priv_key_entry = key_data[unhexlify('f8000000000000000000000000000001')]
-        salt_len = char_to_int(priv_key_entry[1])
-        name_len = char_to_int(priv_key_entry[2])
+        salt_len = o(priv_key_entry[1])
+        name_len = o(priv_key_entry[2])
         priv_key_entry_asn1 = decoder.decode(priv_key_entry[3 + salt_len + name_len:])
         # data = priv_key_entry[3 + salt_len + name_len:]
         # self.print_asn1(data, len(data), 0)
@@ -429,7 +441,7 @@ class Mozilla(ModuleInfo):
                 if not pwd_check:
                     return '', '', ''
                 # Hope not breaking something (not tested for old version)
-                # entry_salt_len = char_to_int(pwd_check[1])
+                # entry_salt_len = o(pwd_check[1])
                 # entry_salt = pwd_check[3: 3 + entry_salt_len]
                 # encrypted_passwd = pwd_check[-16:]
                 global_salt = key_data[b'global-salt']
@@ -463,7 +475,7 @@ class Mozilla(ModuleInfo):
         """
         Try to find master_password doing a dictionary attack using the 500 most used passwords
         """
-        wordlist = constant.password_found + get_dic()
+        wordlist = constant.passwordFound + get_dic()
         num_lines = (len(wordlist) - 1)
         self.info(u'%d most used passwords !!! ' % num_lines)
 
@@ -478,6 +490,7 @@ class Mozilla(ModuleInfo):
         self.warning(u'No password has been found using the default list')
         return '', '', ''
 
+    @staticmethod
     def remove_padding(self, data):
         """
         Remove PKCS#7 padding
@@ -504,25 +517,39 @@ class Mozilla(ModuleInfo):
         """
         Main function
         """
-        pwd_found = []
-        self.path = self.path.format(**constant.profile)
         if os.path.exists(self.path):
-            for profile in self.get_firefox_profiles(self.path):
-                self.debug(u'Profile path found: {profile}'.format(profile=profile))
 
-                credentials = self.get_login_data(profile)
+            pwd_found = []
+            for profile in self.get_firefox_profiles(self.path):
+                self.info(u'Profile path found: {profile}'.format(profile=profile))
+
+                credentials = self.getLoginData(profile)
                 if credentials:
                     for key in self.get_key(profile):
-                        for user, passw, url in credentials:
+                        for user, password, url in credentials:
                             try:
                                 pwd_found.append({
                                     'URL': url,
-                                    'Login': self.decrypt(key=key, iv=user[1], ciphertext=user[2]).decode('utf-8'),
-                                    'Password': self.decrypt(key=key, iv=passw[1], ciphertext=passw[2]).decode('utf-8'),
+                                    'Login': self.decrypt(key=key, iv=user[1], ciphertext=user[2]).decode("utf-8"),
+                                    'Password': self.decrypt(key=key, iv=password[1], ciphertext=password[2]).decode("utf-8"),
                                 })
-                            except Exception:
-                                self.debug(u'An error occured decrypting the password: {error}'.format(error=traceback.format_exc()))
+                            except Exception as e:
+                                self.debug(u'An error occurred decrypting the password: {error}'.format(error=e))
                 else:
                     self.info(u'Database empty')
 
-        return pwd_found
+            return pwd_found
+
+
+# Name, path
+firefox_browsers = [
+    (u'firefox', u"~/Library/Application Support/Firefox/"),
+    # Check these paths on Mac systems
+    # (u'BlackHawk', u'{APPDATA}\\NETGATE Technologies\\BlackHawk'),
+    # (u'Cyberfox', u'{APPDATA}\\8pecxstudios\\Cyberfox'),
+    # (u'Comodo IceDragon', u'{APPDATA}\\Comodo\\IceDragon'),
+    # (u'K-Meleon', u'{APPDATA}\\K-Meleon'),
+    # (u'Icecat', u'{APPDATA}\\Mozilla\\icecat'),
+]
+
+firefox_browsers = [Mozilla(browser_name=name, path=path) for name, path in firefox_browsers]
